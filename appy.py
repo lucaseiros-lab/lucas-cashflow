@@ -2,80 +2,90 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# 1. Configuración Básica
+# 1. Configuración
 st.set_page_config(page_title="Lucas Cashflow", layout="wide")
-
-# Fondo Oscuro por defecto (Híbrido)
-st.markdown("""<style> .stApp { background-color: #0E1117; color: white; } </style>""", unsafe_allow_html=True)
-
+st.markdown("<style>.stApp { background-color: #0E1117; color: white; }</style>", unsafe_allow_html=True)
 st.title("💸 Lucas Cashflow")
 
 # 2. Carga de Archivo
-st.sidebar.header("📁 Subir Datos")
-archivo = st.sidebar.file_uploader("Arrastrá el CSV", type=["csv"])
+archivo = st.sidebar.file_uploader("Subí tu CSV", type=["csv"])
 
 if archivo:
     try:
-        # Leer el archivo ignorando errores de filas
-        df = pd.read_csv(archivo, sep=None, engine='python', on_bad_lines='skip')
+        # Lectura ultra-flexible (ignora errores de formato inicial)
+        df = pd.read_csv(archivo, sep=None, engine='python', encoding='utf-8-sig')
         
-        # Limpiar nombres de columnas (quitar espacios)
-        df.columns = [str(c).strip() for c in df.columns]
-
-        # 3. Selección de Columnas (Si el auto-detect falla, las elegís vos)
-        st.sidebar.subheader("Configurar Columnas")
-        col_det = st.sidebar.selectbox("Columna de Detalle", df.columns, index=0)
-        col_mon = st.sidebar.selectbox("Columna de Monto/Pesos", df.columns, index=1)
-        col_rub = st.sidebar.selectbox("Columna de Rubro/Tipo", df.columns, index=len(df.columns)-1)
-
-        # 4. Limpieza de Datos (A PRUEBA DE TODO)
-        # Forzamos texto en el detalle para que no tire el error de la foto
-        df['Detalle_Safe'] = df[col_det].astype(str).fillna('').str.lower()
+        # Limpieza total de nombres de columnas (quita espacios y comillas locas)
+        df.columns = [str(c).strip().replace('"', '').replace("'", "") for c in df.columns]
         
-        # Limpieza de números (maneja puntos y comas)
-        def a_numero(val):
-            s = str(val).replace('.', '').replace(',', '.')
+        st.sidebar.subheader("⚙️ Configuración de Columnas")
+        st.sidebar.write("Columnas encontradas:", list(df.columns))
+
+        # Buscamos las mejores coincidencias para que no tengas que elegir siempre
+        def encontrar_columna(opciones, actual_cols):
+            for opt in opciones:
+                for col in actual_cols:
+                    if opt.lower() in col.lower(): return col
+            return actual_cols[0]
+
+        # Selectores manuales en el lateral para que NUNCA más falle
+        c_det = st.sidebar.selectbox("Elegí la columna de DETALLE", df.columns, 
+                                     index=list(df.columns).index(encontrar_columna(['detalle', 'concepto', 'movimiento'], df.columns)))
+        
+        c_mon = st.sidebar.selectbox("Elegí la columna de IMPORTE", df.columns, 
+                                     index=list(df.columns).index(encontrar_columna(['pesos', 'monto', 'importe'], df.columns)))
+        
+        c_rub = st.sidebar.selectbox("Elegí la columna de RUBRO/TIPO", df.columns, 
+                                     index=list(df.columns).index(encontrar_columna(['tipo', 'rubro', 'categor'], df.columns)))
+
+        # PROCESAMIENTO DE DATOS
+        # Aseguramos que Detalle sea texto y no explote
+        df['Detalle_Final'] = df[c_det].astype(str).fillna('')
+        
+        # Limpieza de montos (quita puntos de miles y maneja comas)
+        def limpiar_plata(val):
             try:
-                return float(''.join(c for c in s if c in '0123456789.-'))
-            except:
-                return 0.0
+                s = str(val).strip().replace('$', '').replace(' ', '')
+                if ',' in s and '.' in s: s = s.replace('.', '') # 1.234,56 -> 1234,56
+                s = s.replace(',', '.') # 1234,56 -> 1234.56
+                return float(s)
+            except: return 0.0
 
-        df['Monto_Safe'] = df[col_mon].apply(a_numero)
+        df['Monto_Final'] = df[c_mon].apply(limpiar_plata)
+        
+        # LÓGICA DE NEGOCIO (Tus reglas)
+        ingresos = 6000000.0
+        det_low = df['Detalle_Final'].str.lower()
+        
+        es_pago = det_low.str.contains('pago tarjeta', na=False)
+        kw_tarjetas = 'visa|amex|uber|rappi|cabify|netflix|spotify|apple|google'
+        es_tjt = det_low.str.contains(kw_tarjetas, na=False)
+        
+        pago_tjt_total = df[es_pago]['Monto_Final'].abs().sum()
+        deuda_tarjetas = df[es_tjt & ~es_pago]['Monto_Final'].abs().sum()
+        gastos_directos = df[(df['Monto_Final'] < 0) & ~es_pago & ~es_tjt]['Monto_Final'].abs().sum()
+        
+        disponible = ingresos - pago_tjt_total - gastos_directos
 
-        # 5. Cálculos (Tus reglas de negocio)
-        ingresos_total = 6000000.0
-        
-        # Buscamos pagos y consumos de forma ultra segura
-        es_pago = df['Detalle_Safe'].apply(lambda x: 'pago tarjeta' in x)
-        
-        tarjetas_keywords = ['visa', 'amex', 'uber', 'rappi', 'cabify', 'netflix', 'spotify', 'apple', 'google']
-        es_tjt = df['Detalle_Safe'].apply(lambda x: any(k in x for k in tarjetas_keywords))
-        
-        pago_tjt_valor = df[es_pago]['Monto_Safe'].abs().sum()
-        deuda_pendiente = df[es_tjt & ~es_pago]['Monto_Safe'].abs().sum()
-        gastos_directos = df[(df['Monto_Safe'] < 0) & ~es_pago & ~es_tjt]['Monto_Safe'].abs().sum()
-        
-        disponible = ingresos_total - pago_tjt_valor - gastos_directos
-
-        # 6. Mostrar KPIs (Vista iPhone)
-        c1, c2 = st.columns(2)
-        c1.metric("SALDO DISPONIBLE (VERDE)", f"$ {disponible:,.2f}")
-        c2.metric("DEUDA TARJETAS (ROJO)", f"$ {deuda_pendiente:,.2f}", delta="Pasivo")
+        # DASHBOARD (Vista iPhone)
+        col1, col2 = st.columns(2)
+        col1.metric("DISPONIBLE HOY", f"$ {disponible:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+        col2.metric("DEUDA ACUMULADA", f"$ {deuda_tarjetas:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'), delta="Pasivo", delta_color="inverse")
 
         st.markdown("---")
-
-        # 7. Gráfico Analítico
-        df_gastos = df[df['Monto_Safe'] < 0].copy()
+        
+        # Gráfico de Rubros
+        df_gastos = df[df['Monto_Final'] < 0].copy()
         if not df_gastos.empty:
-            fig = px.pie(df_gastos, values=df_gastos['Monto_Safe'].abs(), names=col_rub, 
-                         hole=0.4, template="plotly_dark", title="Gastos por Rubro")
+            fig = px.pie(df_gastos, values=df_gastos['Monto_Final'].abs(), names=c_rub, 
+                         hole=0.4, title="Distribución de Gastos", template="plotly_dark")
             st.plotly_chart(fig, use_container_width=True)
-            
-        # 8. Tabla de Auditoría
-        if st.checkbox("Ver todos los movimientos"):
-            st.dataframe(df[[col_det, col_mon, col_rub]])
+
+        if st.checkbox("Ver Planilla de Auditoría"):
+            st.dataframe(df[[c_det, 'Monto_Final', c_rub]])
 
     except Exception as e:
-        st.error(f"Error procesando el archivo: {e}")
+        st.error(f"Error técnico detectado: {e}")
+        st.write("Por favor, revisá que las columnas seleccionadas en la izquierda sean las correctas.")
 else:
-    st.info("Subí el CSV para ver el Dashboard.")
+    st.info("Subí el archivo CSV para activar el Dashboard.")
