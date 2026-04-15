@@ -2,10 +2,10 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# --- CONFIGURACIÓN DE PÁGINA ---
+# --- CONFIGURACIÓN ---
 st.set_page_config(page_title="Lucas Financial Engine", layout="wide")
 
-# --- SELECTOR DE TEMA ---
+# --- TEMA ---
 theme = st.sidebar.radio("Apariencia", ["Oscuro", "Claro"])
 if theme == "Oscuro":
     bg, txt, chart_theme = "#0E1117", "white", "plotly_dark"
@@ -14,99 +14,110 @@ else:
 
 st.markdown(f"<style>.stApp {{ background-color: {bg}; color: {txt}; }}</style>", unsafe_allow_html=True)
 
-# --- CARGA DE DATOS A PRUEBA DE BALAS ---
-def robust_load(file):
+# --- CARGA ULTRA-DEFENSIVA ---
+def load_data_final(file):
     try:
-        # Detectar separador automáticamente
-        content = file.read().decode('utf-8-sig')
+        # Detectar separador
+        raw_data = file.read()
         file.seek(0)
-        sep = ';' if content.count(';') > content.count(',') else ','
-        df = pd.read_csv(file, sep=sep, encoding='utf-8-sig')
+        decoded = raw_data.decode('utf-8-sig', errors='ignore')
+        sep = ';' if decoded.count(';') > decoded.count(',') else ','
         
-        # 1. Limpiar nombres de columnas (quitar espacios y caracteres raros)
+        df = pd.read_csv(file, sep=sep, encoding='utf-8-sig', engine='python')
+        
+        # 1. Limpiar columnas
         df.columns = [str(c).strip().replace('\ufeff', '') for c in df.columns]
         
-        # 2. Mapeo TOTAL de variantes de nombres
-        mapping = {
-            'Fecha': ['Fecha', 'FECHA', 'Date', 'fecha', 'Fec'],
-            'Detalle': ['Detalle', 'Concepto', 'Descripcion', 'Movimiento', 'Description'],
-            'Importe Pesos': ['Importe Pesos', 'Monto Pesos', 'Pesos', 'Importe', 'Monto'],
-            'Tipo': ['Tipo', 'Categoria', 'Rubro', 'Category']
+        # 2. Mapeo de Nombres
+        mapa = {
+            'Fecha': ['Fecha', 'date', 'fec'],
+            'Detalle': ['Detalle', 'concepto', 'descripcion', 'movimiento'],
+            'Importe Pesos': ['Importe Pesos', 'monto pesos', 'pesos', 'importe'],
+            'Tipo': ['Tipo', 'categoria', 'rubro']
         }
-        
-        for oficial, variantes in mapping.items():
+        for oficial, variantes in mapa.items():
             if oficial not in df.columns:
                 for v in variantes:
-                    if v in df.columns:
-                        df.rename(columns={v: oficial}, inplace=True)
+                    columnas_actuales = [c.lower() for c in df.columns]
+                    if v.lower() in columnas_actuales:
+                        idx = columnas_actuales.index(v.lower())
+                        df.rename(columns={df.columns[idx]: oficial}, inplace=True)
                         break
-        
-        # 3. Crear columnas faltantes si el archivo viene muy pelado (evita KEYERROR)
-        for col in ['Fecha', 'Detalle', 'Importe Pesos', 'Tipo']:
-            if col not in df.columns:
-                df[col] = "N/A" if col != 'Importe Pesos' else 0.0
 
-        # 4. Limpiar Importes (Puntos por Comas)
-        if 'Importe Pesos' in df.columns:
-            df['Importe Pesos'] = df['Importe Pesos'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
-            df['Importe Pesos'] = pd.to_numeric(df['Importe Pesos'], errors='coerce').fillna(0.0)
+        # 3. Asegurar columnas mínimas para que NO falle el dashboard
+        for c in ['Fecha', 'Detalle', 'Importe Pesos', 'Tipo']:
+            if c not in df.columns: df[c] = ""
+            
+        # 4. Limpiar Números (Fallo crítico anterior corregido)
+        def clean_currency(x):
+            s = str(x).replace('.', '').replace(',', '.')
+            try: return float(s)
+            except: return 0.0
+
+        df['Importe Pesos'] = df['Importe Pesos'].apply(clean_currency)
+        if 'Importe Dólares' in df.columns:
+            df['Importe Dólares'] = df['Importe Dólares'].apply(clean_currency)
+        else:
+            df['Importe Dólares'] = 0.0
+
+        # 5. Asegurar que Detalle sea STRING siempre (Evita el error de la foto)
+        df['Detalle'] = df['Detalle'].astype(str).fillna('')
         
         return df
     except Exception as e:
-        st.error(f"Error cargando el archivo: {e}")
+        st.error(f"Error al leer: {e}")
         return None
 
 # --- INTERFAZ ---
-st.sidebar.header("📁 Carga de Resumen")
-uploaded_file = st.sidebar.file_uploader("Arrastrá tu CSV aquí", type=["csv"])
+st.sidebar.header("📁 Resumen Bancario")
+uploaded_file = st.sidebar.file_uploader("Subí tu CSV", type=["csv"])
 
-df = robust_load(uploaded_file) if uploaded_file else None
+df = load_data_final(uploaded_file) if uploaded_file else None
 
 if df is not None:
     st.title("💸 Lucas Financial Dashboard")
     
-    # 5. Lógica de Negocio
+    # Lógica de flujo
     ingresos_fijos = 6000000.0
-    df['det_low'] = df['Detalle'].astype(str).str.lower()
+    df['det_low'] = df['Detalle'].str.lower()
     
-    # Identificar Pagos de Tarjeta vs Consumos
+    # REGLA DE DETECCIÓN (Nativa de Pandas, no falla con floats/NaNs)
     es_pago = df['det_low'].str.contains('pago tarjeta', na=False)
-    es_tarjeta = df['det_low'].str.contains('visa|amex|uber|rappi|cabify|netflix|spotify|apple|google', na=False)
+    # Filtro de palabras clave para tarjetas
+    kw = 'visa|amex|uber|rappi|cabify|netflix|spotify|apple|google|youtube'
+    es_tarjeta = df['det_low'].str.contains(kw, na=False)
     
     pago_tjt_total = df[es_pago]['Importe Pesos'].abs().sum()
     deuda_pendiente = df[es_tarjeta & ~es_pago]['Importe Pesos'].abs().sum()
-    gastos_cash = df[(df['Importe Pesos'] < 0) & ~es_pago & ~es_tarjeta]['Importe Pesos'].abs().sum()
+    gastos_directos = df[(df['Importe Pesos'] < 0) & ~es_pago & ~es_tarjeta]['Importe Pesos'].abs().sum()
     
-    disponible = ingresos_fijos - pago_tjt_total - gastos_cash
+    disponible = ingresos_fijos - pago_tjt_total - gastos_directos
 
-    # 6. KPIs (Vista iPhone)
+    # KPIs
     c1, c2 = st.columns(2)
     c1.metric("SALDO DISPONIBLE", f"$ {disponible:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
     c2.metric("DEUDA TARJETAS", f"$ {deuda_pendiente:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'), delta="Pasivo", delta_color="inverse")
 
-    # 7. Gráficos (Vista Analítica)
     st.markdown("---")
-    col_pie, col_stats = st.columns([2, 1])
     
-    with col_pie:
+    # Gráfico y Presupuesto
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
         df_g = df[df['Importe Pesos'] < 0].copy()
         if not df_g.empty:
             fig = px.pie(df_g, values=df_g['Importe Pesos'].abs(), names='Tipo', 
-                         title="Distribución de Gastos", template=chart_theme, hole=0.4)
+                         title="Gastos por Rubro", template=chart_theme, hole=0.4)
             st.plotly_chart(fig, use_container_width=True)
-            
-    with col_stats:
-        st.write("### Regla 50-30-20")
+    
+    with col_b:
+        st.write("### Presupuesto 50-30-20")
         st.progress(0.5, text=f"Fijos (50%): $ {ingresos_fijos*0.5:,.0f}")
         st.progress(0.3, text=f"Deseos (30%): $ {ingresos_fijos*0.3:,.0f}")
         st.progress(0.2, text=f"Ahorro (20%): $ {ingresos_fijos*0.2:,.0f}")
 
-    # 8. Auditoría Segura
-    if st.checkbox("Ver Planilla de Movimientos"):
-        # Solo mostramos lo que existe
-        cols_ok = [c for c in ['Fecha', 'Detalle', 'Importe Pesos', 'Tipo'] if c in df.columns]
-        st.dataframe(df[cols_ok], use_container_width=True)
+    if st.checkbox("Ver Auditoría de Movimientos"):
+        st.dataframe(df[['Fecha', 'Detalle', 'Importe Pesos', 'Tipo']], use_container_width=True)
 
 else:
-    st.title("👋 ¡Hola Lucas!")
-    st.info("Arrastrá tu archivo CSV en el panel lateral para encender el Dashboard.")
+    st.title("👋 Bienvenido Lucas")
+    st.info("Subí el archivo CSV en el panel de la izquierda para ver tu estado financiero.")
