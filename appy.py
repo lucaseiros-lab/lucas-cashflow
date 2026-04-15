@@ -1,95 +1,84 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import io
 
-# 1. Configuración de la App
 st.set_page_config(page_title="Lucas Financial Engine", layout="wide")
 
-# Selector de Apariencia
-theme = st.sidebar.radio("Apariencia", ["Oscuro", "Claro"])
-if theme == "Oscuro":
-    bg, txt, chart_theme = "#0E1117", "white", "plotly_dark"
-else:
-    bg, txt, chart_theme = "#FFFFFF", "#31333F", "plotly_white"
+# --- ESTILOS ---
+st.markdown("""<style> .stApp { background-color: #0E1117; color: white; } </style>""", unsafe_allow_html=True)
 
-st.markdown(f"<style>.stApp {{ background-color: {bg}; color: {txt}; }}</style>", unsafe_allow_html=True)
+st.title("💸 Lucas Financial Dashboard")
 
-# 2. Carga y Procesamiento
-st.sidebar.header("📁 Datos")
-uploaded = st.sidebar.file_uploader("Subí tu CSV", type=["csv"])
+# --- CARGA ATÓMICA ---
+st.sidebar.header("📁 Carga de Resumen")
+uploaded_file = st.sidebar.file_uploader("Subí tu CSV", type=["csv"])
 
-if uploaded:
+if uploaded_file is not None:
+    # Intentar leer el archivo de todas las formas posibles
+    df = None
     try:
-        # Lectura con auto-detección de separador
-        df_raw = pd.read_csv(uploaded, sep=None, engine='python', encoding='utf-8-sig')
-        df_raw.columns = [str(c).strip().replace('\ufeff', '') for c in df_raw.columns]
-        
-        # --- MAPEO MANUAL (Si el auto-detect falla, vos mandás) ---
-        st.sidebar.subheader("Validar Columnas")
-        cols = list(df_raw.columns)
-        
-        def find_idx(keys, options):
-            for i, opt in enumerate(options):
-                if any(k in opt.lower() for k in keys): return i
-            return 0
+        # Intento 1: Separador ;
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, sep=';', encoding='utf-8-sig', on_bad_lines='skip')
+        if len(df.columns) < 2: raise Exception()
+    except:
+        try:
+            # Intento 2: Separador ,
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, sep=',', encoding='utf-8-sig', on_bad_lines='skip')
+        except Exception as e:
+            st.error(f"Error crítico de lectura: {e}")
 
-        sel_detalle = st.sidebar.selectbox("¿Cuál es la columna de Detalle?", cols, index=find_idx(['detalle', 'concepto', 'mov'], cols))
-        sel_monto = st.sidebar.selectbox("¿Cuál es la columna de Importe?", cols, index=find_idx(['importe', 'pesos', 'monto'], cols))
-        sel_tipo = st.sidebar.selectbox("¿Cuál es la columna de Rubro/Tipo?", cols, index=find_idx(['tipo', 'rubro', 'categ'], cols))
+    if df is not None:
+        # Limpiar nombres de columnas
+        df.columns = [str(c).strip() for c in df.columns]
         
-        # Crear DataFrame estandarizado
-        df = df_raw.copy()
-        df['Detalle'] = df[sel_detalle].astype(str).fillna('')
-        
-        def clean_num(x):
-            try:
+        # --- SELECTORES MANUALES (PARA QUE NO FALLE NUNCA) ---
+        st.sidebar.subheader("Verificar Columnas")
+        col_detalle = st.sidebar.selectbox("Columna de Detalle/Concepto", df.columns)
+        col_importe = st.sidebar.selectbox("Columna de Importe/Pesos", df.columns)
+        col_tipo = st.sidebar.selectbox("Columna de Tipo/Rubro", df.columns)
+
+        try:
+            # Limpiar importes
+            def clean_val(x):
                 s = str(x).replace('.', '').replace(',', '.')
-                return float(''.join(c for c in s if c in '0123456789.-'))
-            except: return 0.0
+                return pd.to_numeric(''.join(c for c in s if c in '0123456789.-'), errors='coerce')
+
+            df['Monto'] = df[col_importe].apply(clean_val).fillna(0.0)
+            df['Concepto'] = df[col_detalle].astype(str).fillna('')
             
-        df['Importe Pesos'] = df[sel_monto].apply(clean_num)
-        df['Tipo'] = df[sel_tipo] if sel_tipo in df.columns else "Varios"
-        
-        # --- DASHBOARD ---
-        st.title("💸 Lucas Financial Dashboard")
-        
-        ingresos = 6000000.0
-        df_low = df['Detalle'].str.lower()
-        
-        # Lógica de detección
-        es_pago = df_low.str.contains('pago tarjeta', na=False)
-        kw_tjt = 'visa|amex|uber|rappi|cabify|netflix|spotify|apple|google|youtube'
-        es_tjt = df_low.str.contains(kw_tjt, na=False)
-        
-        pago_tjt_total = df[es_pago]['Importe Pesos'].abs().sum()
-        deuda_pendiente = df[es_tjt & ~es_pago]['Importe Pesos'].abs().sum()
-        gastos_cash = df[(df['Importe Pesos'] < 0) & ~es_pago & ~es_tjt]['Importe Pesos'].abs().sum()
-        disponible = ingresos - pago_tjt_total - gastos_cash
+            # --- LÓGICA DE DASHBOARD ---
+            ingresos = 6000000.0
+            
+            # Detección
+            pago_tjt = df[df['Concepto'].str.contains('pago tarjeta', case=False, na=False)]['Monto'].abs().sum()
+            
+            kw = 'visa|amex|uber|rappi|cabify|netflix|spotify|apple|google'
+            es_tjt = df['Concepto'].str.contains(kw, case=False, na=False)
+            es_pago = df['Concepto'].str.contains('pago tarjeta', case=False, na=False)
+            
+            deuda_tjt = df[es_tjt & ~es_pago]['Monto'].abs().sum()
+            gastos_cash = df[(df['Monto'] < 0) & ~es_tjt & ~es_pago]['Monto'].abs().sum()
+            
+            disponible = ingresos - pago_tjt - gastos_cash
 
-        # KPIs (Vista iPhone)
-        c1, c2 = st.columns(2)
-        c1.metric("SALDO DISPONIBLE", f"$ {disponible:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-        c2.metric("DEUDA TARJETAS", f"$ {deuda_pendiente:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'), delta="Pasivo", delta_color="inverse")
+            # KPIs
+            c1, c2 = st.columns(2)
+            c1.metric("SALDO DISPONIBLE", f"$ {disponible:,.2f}")
+            c2.metric("DEUDA TARJETAS", f"$ {deuda_tjt:,.2f}", delta="Pasivo")
 
-        st.markdown("---")
-        
-        # Gráfico y Plan 50-30-20
-        col_a, col_b = st.columns([2, 1])
-        with col_a:
-            df_g = df[df['Importe Pesos'] < 0]
+            # Gráfico
+            st.markdown("---")
+            df_g = df[df['Monto'] < 0]
             if not df_g.empty:
-                fig = px.pie(df_g, values=df_g['Importe Pesos'].abs(), names='Tipo', 
-                             title="Gastos por Rubro", hole=0.4, template=chart_theme)
+                fig = px.pie(df_g, values=df_g['Monto'].abs(), names=col_tipo, hole=0.4, template="plotly_dark")
                 st.plotly_chart(fig, use_container_width=True)
-        
-        with col_b:
-            st.write("### Plan 50-30-20")
-            st.progress(0.5, text=f"Fijos (50%): $ {ingresos*0.5:,.0f}")
-            st.progress(0.3, text=f"Deseos (30%): $ {ingresos*0.3:,.0f}")
-            st.progress(0.2, text=f"Ahorro (20%): $ {ingresos*0.2:,.0f}")
-            
-    except Exception as e:
-        st.error(f"Error en el procesamiento: {e}")
+
+        except Exception as e:
+            st.error(f"Error al procesar los datos: {e}")
+            st.write("Columnas detectadas:", list(df.columns))
+            st.dataframe(df.head())
 else:
-    st.title("👋 ¡Hola Lucas!")
-    st.info("Subí el archivo CSV en el panel de la izquierda para activar el Dashboard.")
+    st.info("Subí el CSV para empezar.")
