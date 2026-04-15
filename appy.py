@@ -2,110 +2,80 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-# 1. Configuración de la App
+# 1. Configuración Básica
 st.set_page_config(page_title="Lucas Cashflow", layout="wide")
 
-# Estilos de Fondo
-theme = st.sidebar.radio("Apariencia", ["Oscuro", "Claro"])
-if theme == "Oscuro":
-    bg, txt, chart_theme = "#0E1117", "white", "plotly_dark"
-else:
-    bg, txt, chart_theme = "#FFFFFF", "#31333F", "plotly_white"
+# Fondo Oscuro por defecto (Híbrido)
+st.markdown("""<style> .stApp { background-color: #0E1117; color: white; } </style>""", unsafe_allow_html=True)
 
-st.markdown(f"<style>.stApp {{ background-color: {bg}; color: {txt}; }}</style>", unsafe_allow_html=True)
+st.title("💸 Lucas Cashflow")
 
-# 2. Función de Carga Blindada
-def cargar_datos(archivo):
+# 2. Carga de Archivo
+st.sidebar.header("📁 Subir Datos")
+archivo = st.sidebar.file_uploader("Arrastrá el CSV", type=["csv"])
+
+if archivo:
     try:
-        # Detectar separador automáticamente
-        raw = archivo.read()
-        archivo.seek(0)
-        encoding = 'utf-8-sig'
-        decoded = raw.decode(encoding, errors='ignore')
-        sep = ';' if decoded.count(';') > decoded.count(',') else ','
+        # Leer el archivo ignorando errores de filas
+        df = pd.read_csv(archivo, sep=None, engine='python', on_bad_lines='skip')
         
-        # Leer el CSV
-        df = pd.read_csv(archivo, sep=sep, engine='python', encoding=encoding)
-        
-        # Limpiar nombres de columnas
-        df.columns = [str(c).strip().replace('\ufeff', '') for c in df.columns]
-        
-        return df
-    except Exception as e:
-        st.error(f"No se pudo leer el archivo: {e}")
-        return pd.DataFrame() # Devuelve tabla vacía, no None, para evitar el error de la foto
+        # Limpiar nombres de columnas (quitar espacios)
+        df.columns = [str(c).strip() for c in df.columns]
 
-# 3. Interfaz Principal
-st.sidebar.header("📁 Carga de Resumen")
-subido = st.sidebar.file_uploader("Subí tu CSV aquí", type=["csv"])
+        # 3. Selección de Columnas (Si el auto-detect falla, las elegís vos)
+        st.sidebar.subheader("Configurar Columnas")
+        col_det = st.sidebar.selectbox("Columna de Detalle", df.columns, index=0)
+        col_mon = st.sidebar.selectbox("Columna de Monto/Pesos", df.columns, index=1)
+        col_rub = st.sidebar.selectbox("Columna de Rubro/Tipo", df.columns, index=len(df.columns)-1)
 
-if subido:
-    df = cargar_datos(subido)
-    
-    if not df.empty:
-        st.title("💸 Lucas Cashflow")
+        # 4. Limpieza de Datos (A PRUEBA DE TODO)
+        # Forzamos texto en el detalle para que no tire el error de la foto
+        df['Detalle_Safe'] = df[col_det].astype(str).fillna('').str.lower()
         
-        # Mapeo de columnas por si cambian los nombres
-        columnas = list(df.columns)
-        def buscar_col(keys):
-            for k in keys:
-                for c in columnas:
-                    if k.lower() in c.lower(): return c
-            return None
+        # Limpieza de números (maneja puntos y comas)
+        def a_numero(val):
+            s = str(val).replace('.', '').replace(',', '.')
+            try:
+                return float(''.join(c for c in s if c in '0123456789.-'))
+            except:
+                return 0.0
 
-        col_detalle = buscar_col(['detalle', 'concepto', 'movimiento'])
-        col_monto = buscar_col(['pesos', 'importe', 'monto'])
-        col_tipo = buscar_col(['tipo', 'rubro', 'categ'])
+        df['Monto_Safe'] = df[col_mon].apply(a_numero)
 
-        # Si faltan columnas, pedimos que las elija
-        if not col_detalle or not col_monto:
-            st.warning("⚠️ No pude detectar las columnas automáticamente. Por favor, seleccionalas:")
-            col_detalle = st.selectbox("Columna de Detalle", columnas)
-            col_monto = st.selectbox("Columna de Importe", columnas)
-            col_tipo = st.selectbox("Columna de Rubro", columnas)
-
-        # Limpieza de Números
-        def limpiar_guita(x):
-            s = str(x).replace('.', '').replace(',', '.')
-            try: return float(''.join(c for c in s if c in '0123456789.-'))
-            except: return 0.0
-
-        df['Monto_Limpio'] = df[col_monto].apply(limpiar_guita)
-        df['Detalle_Limpio'] = df[col_detalle].astype(str).fillna('')
+        # 5. Cálculos (Tus reglas de negocio)
+        ingresos_total = 6000000.0
         
-        # 4. Lógica de Flujo (Tus Reglas)
-        ingresos_mes = 6000000.0
-        df_low = df['Detalle_Limpio'].str.lower()
+        # Buscamos pagos y consumos de forma ultra segura
+        es_pago = df['Detalle_Safe'].apply(lambda x: 'pago tarjeta' in x)
         
-        es_pago = df_low.str.contains('pago tarjeta', na=False)
-        es_tarjeta = df_low.str.contains('visa|amex|uber|rappi|cabify|netflix|spotify|apple|google', na=False)
+        tarjetas_keywords = ['visa', 'amex', 'uber', 'rappi', 'cabify', 'netflix', 'spotify', 'apple', 'google']
+        es_tjt = df['Detalle_Safe'].apply(lambda x: any(k in x for k in tarjetas_keywords))
         
-        pago_tjt_total = df[es_pago]['Monto_Limpio'].abs().sum()
-        deuda_tarjetas = df[es_tarjeta & ~es_pago]['Monto_Limpio'].abs().sum()
-        gastos_cash = df[(df['Monto_Limpio'] < 0) & ~es_pago & ~es_tarjeta]['Monto_Limpio'].abs().sum()
+        pago_tjt_valor = df[es_pago]['Monto_Safe'].abs().sum()
+        deuda_pendiente = df[es_tjt & ~es_pago]['Monto_Safe'].abs().sum()
+        gastos_directos = df[(df['Monto_Safe'] < 0) & ~es_pago & ~es_tjt]['Monto_Safe'].abs().sum()
         
-        disponible = ingresos_mes - pago_tjt_total - gastos_cash
+        disponible = ingresos_total - pago_tjt_valor - gastos_directos
 
-        # 5. Visualización (KPIs)
+        # 6. Mostrar KPIs (Vista iPhone)
         c1, c2 = st.columns(2)
-        c1.metric("SALDO DISPONIBLE", f"$ {disponible:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-        c2.metric("DEUDA TARJETAS (ROJO)", f"$ {deuda_tarjetas:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'), delta_color="inverse")
+        c1.metric("SALDO DISPONIBLE (VERDE)", f"$ {disponible:,.2f}")
+        c2.metric("DEUDA TARJETAS (ROJO)", f"$ {deuda_pendiente:,.2f}", delta="Pasivo")
 
         st.markdown("---")
 
-        # 6. Gráfico de Rubros (Protegido contra errores)
-        df_egresos = df[df['Monto_Limpio'] < 0]
-        if not df_egresos.empty:
-            nombre_rubro = col_tipo if col_tipo else col_detalle
-            fig = px.pie(df_egresos, values=df_egresos['Monto_Limpio'].abs(), names=nombre_rubro, 
-                         title="Distribución por Rubro", hole=0.4, template=chart_theme)
+        # 7. Gráfico Analítico
+        df_gastos = df[df['Monto_Safe'] < 0].copy()
+        if not df_gastos.empty:
+            fig = px.pie(df_gastos, values=df_gastos['Monto_Safe'].abs(), names=col_rub, 
+                         hole=0.4, template="plotly_dark", title="Gastos por Rubro")
             st.plotly_chart(fig, use_container_width=True)
-
-        # Auditoría
+            
+        # 8. Tabla de Auditoría
         if st.checkbox("Ver todos los movimientos"):
-            st.dataframe(df)
-    else:
-        st.error("El archivo está vacío o no tiene el formato correcto.")
+            st.dataframe(df[[col_det, col_mon, col_rub]])
+
+    except Exception as e:
+        st.error(f"Error procesando el archivo: {e}")
 else:
-    st.title("👋 Bienvenido Lucas")
-    st.info("Subí el archivo CSV para ver tu Lucas Cashflow.")
+    st.info("Subí el CSV para ver el Dashboard.")
