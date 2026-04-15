@@ -13,32 +13,48 @@ else:
 
 st.markdown(f"<style>.stApp {{ background-color: {bg}; color: {txt}; }}</style>", unsafe_allow_html=True)
 
-# --- CARGA DE DATOS ROBUSTA ---
+# --- CARGA DE DATOS ULTRA-ROBUSTA ---
 st.sidebar.header("📁 Carga de Datos")
 uploaded_file = st.sidebar.file_uploader("Subí tu CSV", type=["csv"])
 
 def load_data(file):
     try:
-        # Probamos leer con ; y si falla con ,
+        # Probamos diferentes encodings y separadores
         try:
-            df = pd.read_csv(file, sep=';', encoding='utf-8')
-            if len(df.columns) < 2: raise Exception()
+            df = pd.read_csv(file, sep=';', encoding='utf-8-sig')
         except:
             file.seek(0)
-            df = pd.read_csv(file, sep=',', encoding='utf-8')
+            df = pd.read_csv(file, sep=',', encoding='utf-8-sig')
         
-        # Limpiar nombres de columnas (quitar espacios)
+        # 1. Limpiar nombres de columnas
         df.columns = [str(c).strip() for c in df.columns]
         
-        # Limpiar importes
+        # 2. Mapeo inteligente de columnas (por si cambió el nombre)
+        mapeo = {
+            'Detalle': ['Detalle', 'Concepto', 'Descripcion', 'Movimiento'],
+            'Importe Pesos': ['Importe Pesos', 'Monto Pesos', 'Pesos'],
+            'Tipo': ['Tipo', 'Categoria', 'Rubro']
+        }
+        
+        for oficial, variantes in mapeo.items():
+            if oficial not in df.columns:
+                for v in variantes:
+                    if v in df.columns:
+                        df.rename(columns={v: oficial}, inplace=True)
+                        break
+        
+        # 3. Validar columnas críticas
+        if 'Detalle' not in df.columns:
+            st.error(f"⚠️ No encuentro la columna 'Detalle'. Columnas detectadas: {list(df.columns)}")
+            return None
+
+        # 4. Limpiar importes
         for col in ['Importe Pesos', 'Importe Dólares']:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
         
-        # Asegurar que 'Tipo' exista para que no tire KeyError
-        if 'Tipo' not in df.columns:
-            df['Tipo'] = 'Sin Categoría'
+        if 'Tipo' not in df.columns: df['Tipo'] = 'Sin Categoría'
         
         return df
     except Exception as e:
@@ -49,44 +65,44 @@ df = None
 if uploaded_file:
     df = load_data(uploaded_file)
 
-# --- DASHBOARD ---
+# --- RENDERIZADO ---
 if df is not None:
     st.title("💸 Lucas Financial Dashboard")
     
-    # Cálculos
+    # Cálculos con protección contra valores nulos
     ingresos = 6000000.0
     
-    # Identificar pagos y consumos
-    def check_str(val, search):
-        return search.lower() in str(val).lower()
-
-    pagos_mask = df['Detalle'].apply(lambda x: check_str(x, 'Pago tarjeta'))
+    # Filtros inteligentes
+    df['Detalle_Lower'] = df['Detalle'].astype(str).str.lower()
+    
+    pagos_mask = df['Detalle_Lower'].str.contains('pago tarjeta', na=False)
     pagos_tjt = df[pagos_mask]['Importe Pesos'].abs().sum()
     
-    consumos_mask = df['Detalle'].apply(lambda x: any(k in str(x).lower() for k in ['visa', 'amex', 'uber', 'rappi', 'cabify', 'netflix', 'spotify']))
+    keywords_tjt = ['visa', 'amex', 'uber', 'rappi', 'cabify', 'netflix', 'spotify', 'apple', 'google']
+    consumos_mask = df['Detalle_Lower'].apply(lambda x: any(k in x for k in keywords_tjt))
     consumos_tjt = df[consumos_mask & ~pagos_mask]['Importe Pesos'].abs().sum()
     
     gastos_directos = df[(df['Importe Pesos'] < 0) & ~pagos_mask & ~consumos_mask]['Importe Pesos'].abs().sum()
-    
     disponible = ingresos - pagos_tjt - gastos_directos
 
     # KPIs
     c1, c2 = st.columns(2)
-    c1.metric("SALDO DISPONIBLE", f"$ {disponible:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-    c2.metric("DEUDA TARJETAS", f"$ {consumos_tjt:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'), delta="Pendiente", delta_color="inverse")
+    with c1:
+        st.metric("SALDO DISPONIBLE", f"$ {disponible:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+    with c2:
+        st.metric("DEUDA TARJETAS", f"$ {consumos_tjt:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'), delta="Pasivo Pendiente", delta_color="inverse")
 
     # Gráfico
     st.markdown("---")
-    df_gastos = df[df['Importe Pesos'] < 0]
+    df_gastos = df[df['Importe Pesos'] < 0].copy()
     if not df_gastos.empty:
         fig = px.pie(df_gastos, values=df_gastos['Importe Pesos'].abs(), names='Tipo', 
-                     title="Distribución de Gastos", template=chart_theme)
+                     title="Gastos por Rubro", template=chart_theme, hole=0.4)
         st.plotly_chart(fig, use_container_width=True)
     
-    # Vista de tabla para auditar
-    if st.checkbox("Ver movimientos detectados"):
-        st.dataframe(df)
+    if st.checkbox("Ver Planilla de Movimientos"):
+        st.dataframe(df[['Fecha', 'Detalle', 'Importe Pesos', 'Tipo']])
 
 else:
     st.title("👋 ¡Hola Lucas!")
-    st.info("Arrastrá el archivo CSV en el panel de la izquierda para empezar.")
+    st.info("Para activar el sistema, subí tu archivo CSV desde el panel lateral.")
